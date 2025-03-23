@@ -1,0 +1,70 @@
+body {
+  font-family: sans-serif;
+  margin: 20px;
+  padding: 0;
+  background: #f9f9f9;
+}
+
+.container {
+  max-width: 1000px;
+  margin: 0 auto;
+  background: white;
+  padding: 20px;
+  border-radius: 4px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+}
+
+h1, h2 {
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+
+.tariff-section {
+  margin-bottom: 20px;
+}
+
+.tariff-hint {
+  font-size: 0.9em;
+  color: #555;
+}
+
+.tariff-table-section {
+  margin-bottom: 20px;
+}
+
+#tariffTableContainer {
+  margin-top: 10px;
+  border: 1px solid #ddd;
+  padding: 10px;
+  border-radius: 4px;
+  background: #fafafa;
+}
+
+#tariffTable {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 10px;
+}
+
+#tariffTable th, #tariffTable td {
+  border: 1px solid #ccc;
+  padding: 8px;
+}
+
+#overlapWarning {
+  color: #cc0000;
+  font-weight: bold;
+}
+
+.period-section {
+  margin-bottom: 20px;
+}
+
+.navigation-controls {
+  margin-bottom: 20px;
+}
+
+canvas {
+  border: 1px solid #ccc;
+}
+

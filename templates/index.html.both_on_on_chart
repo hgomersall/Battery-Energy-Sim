@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>Energy Data with Battery (Combined Chart)</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
+  <!-- Chart.js v4.x from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.2.1"></script>
+</head>
+<body>
+<div class="container">
+  <h1>Energy Data Viewer (Single Chart, Battery vs. Raw)</h1>
+
+  <!-- Default Tariff: Price + Mode -->
+  <div style="margin-bottom: 15px;">
+    <label>Default Tariff Price (p/kWh):</label>
+    <input type="number" id="defaultTariffPrice" value="30.0" step="0.01" style="width:80px;"/>
+    <label style="margin-left: 1em;">Mode:</label>
+    <select id="defaultTariffMode">
+      <option value="charge">Charge Battery</option>
+      <option value="discharge" selected>Discharge Battery</option>
+    </select>
+  </div>
+
+  <!-- Battery Capacity -->
+  <div style="margin-bottom:15px;">
+    <label>Battery Capacity (kWh):</label>
+    <input type="number" id="batteryCapacity" value="0" step="0.1" style="width:80px;"/>
+    <p style="font-size:0.9em; color:#666; margin-top:5px;">
+      0 means no battery. Max 1.5 kWh can be charged each 30 min block.
+    </p>
+  </div>
+
+  <!-- Special Tariffs Table -->
+  <div style="margin-bottom: 15px;">
+    <button id="toggleTariffTableBtn">Show/Hide Special Tariffs</button>
+    <div id="tariffTableContainer" style="display:none; margin-top:1em;">
+      <h2>Special Tariffs (Time of Day, Every Day)</h2>
+      <table id="tariffTable">
+        <thead>
+          <tr>
+            <th>Start Time (HH:MM)</th>
+            <th>Until Time (HH:MM)</th>
+            <th>Mode</th>
+            <th>Price (p/kWh)</th>
+            <th>Remove?</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <button id="addTariffRowBtn">Add Row</button>
+      <p id="overlapWarning" style="display:none; color:red; font-weight:bold;">
+        Overlapping special tariff entries detected! Please fix them.
+      </p>
+    </div>
+  </div>
+
+  <!-- View Mode: Cost or Consumption -->
+  <div style="margin-bottom:15px;">
+    <strong>View Mode:</strong>
+    <label><input type="radio" name="viewMode" value="cost" checked/>Price</label>
+    <label><input type="radio" name="viewMode" value="consumption"/>Consumption</label>
+  </div>
+
+  <!-- Period Selector -->
+  <div style="margin-bottom:15px;">
+    <label for="periodSelect">Aggregation Period:</label>
+    <select id="periodSelect">
+      <option value="30min">30 minutes</option>
+      <option value="1h">1 hour</option>
+      <option value="1d">1 day</option>
+      <option value="1M">1 month</option>
+      <option value="1y">1 year</option>
+    </select>
+  </div>
+
+  <!-- Navigation Buttons -->
+  <div class="navigation-controls">
+    <button id="prevBtn">&larr; Previous</button>
+    <span id="navLabel"></span>
+    <button id="nextBtn">Next &rarr;</button>
+  </div>
+
+  <!-- Single Combined Chart -->
+  <canvas id="myChart" width="800" height="400"></canvas>
+
+  <!-- Totals Display -->
+  <h2>Totals for Displayed Period</h2>
+  <div id="totalsContainer" style="border:1px solid #ccc; padding:10px; border-radius:4px; background:#fafafa;">
+    <!-- We'll fill these paragraphs with the aggregated totals. -->
+    <p id="originalTotals"></p>
+    <p id="batteryTotals"></p>
+  </div>
+
+</div>
+
+<script>
+/****************************************************************
+ * Global Variables
+ ****************************************************************/
+let halfHourData = [];
+let myChart = null;
+
+let currentDate = null;        // underlying date/time in full resolution
+let currentPeriod = '30min';   // aggregator: '30min','1h','1d','1M','1y'
+let currentViewMode = 'cost';  // 'cost' or 'consumption'
+
+// Default Tariff
+let defaultTariff = {
+  pricePence: 30.0,
+  mode: 'discharge'
+};
+
+// Battery capacity (kWh)
+let batteryCapacity = 0.0;
+
+/**
+ * Special Tariffs: array of objects:
+ * {
+ *   startTime: 'HH:MM',
+ *   endTime:   'HH:MM',
+ *   mode:      'charge' | 'discharge',
+ *   pricePence: number
+ * }
+ * We apply these to each day. If multiple match, the first in the table has priority.
+ */
+let specialTariffs = [];
+
+/****************************************************************
+ * On Window Load
+ ****************************************************************/
+window.addEventListener('load', async () => {
+  // 1. Fetch data
+  const resp = await fetch('/data');
+  halfHourData = await resp.json();
+
+  // 2. Set currentDate to earliest record if available
+  if (halfHourData.length>0) {
+    currentDate = new Date(halfHourData[0].startDateTime);
+  } else {
+    currentDate = new Date();
+  }
+
+  // 3. Init the single chart
+  initChart();
+
+  // 4. Event handlers
+  document.getElementById('periodSelect').addEventListener('change', e => {
+    currentPeriod = e.target.value;
+    refreshChart();
+  });
+  document.getElementById('prevBtn').addEventListener('click', ()=>shiftView(-1));
+  document.getElementById('nextBtn').addEventListener('click', ()=>shiftView(1));
+
+  document.querySelectorAll('input[name="viewMode"]').forEach(radio => {
+    radio.addEventListener('change', e => {
+      currentViewMode = e.target.value; // 'cost' or 'consumption'
+      refreshChart();
+    });
+  });
+
+  // Default tariff
+  document.getElementById('defaultTariffPrice').addEventListener('change', updateDefaultTariff);
+  document.getElementById('defaultTariffMode').addEventListener('change', updateDefaultTariff);
+
+  // Battery
+  document.getElementById('batteryCapacity').addEventListener('change', updateBatteryCapacity);
+
+  // Tariff table
+  document.getElementById('toggleTariffTableBtn').addEventListener('click', toggleTariffTable);
+  document.getElementById('addTariffRowBtn').addEventListener('click', addTariffRow);
+
+  // 5. Initial refresh
+  refreshChart();
+});
+
+/****************************************************************
+ * Chart Initialization
+ ****************************************************************/
+function initChart() {
+  const ctx = document.getElementById('myChart').getContext('2d');
+  myChart = new Chart(ctx, {
+    data: {
+      labels: [],
+      datasets: [
+        // 0 => Raw aggregator bars
+        {
+          type: 'bar',
+          label: 'Original',
+          data: []
+        },
+        // 1 => Battery aggregator bars
+        {
+          type: 'bar',
+          label: 'Battery-Adjusted',
+          data: []
+        },
+        // 2 => Battery SoC line
+        {
+          type: 'line',
+          label: 'Battery SoC (kWh)',
+          data: [],
+          yAxisID: 'y2',
+          borderWidth: 2
+        }
+      ]
+    },
+    options: {
+      // As requested, comment out "responsive" and "maintainAspectRatio" to fix size:
+      // responsive: true,
+      // maintainAspectRatio: false,
+      scales: {
+        y: {
+          beginAtZero: true,
+          title: { display: true, text: '' } // "Cost in GBP" or "Consumption (kWh)"
+        },
+        y2: {
+          beginAtZero: true,
+          position: 'right',
+          title: { display: true, text: 'SoC (kWh)' },
+          grid: { drawOnChartArea: false }
+        }
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              const val = context.parsed.y;
+              const idx = context.datasetIndex;
+              // If dataset 2 => SoC line
+              if (idx===2) {
+                return val.toFixed(2) + ' kWh (SoC)';
+              }
+              // Otherwise it's a bar => cost or consumption
+              if (currentViewMode==='cost') {
+                return '£' + val.toFixed(2);
+              } else {
+                return val.toFixed(3) + ' kWh';
+              }
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+/****************************************************************
+ * refreshChart()
+ ****************************************************************/
+function refreshChart() {
+  // 1. Re-read special tariffs
+  readTariffTable();
+
+  // 2. Build aggregator data for "raw" and "battery" (for the *current* aggregator period + mode).
+  //    We'll also want the SoC line from battery aggregator if 30min or 1h.
+  const rawAgg = buildAggregator('raw', currentViewMode);
+  const batteryAgg = buildAggregator('battery', currentViewMode);
+
+  // 3. Combine them into the single chart’s datasets
+  myChart.data.labels = rawAgg.labels; // assume same labeling for raw & battery
+  // Bars for raw
+  myChart.data.datasets[0].data = rawAgg.barValues;
+  // Bars for battery
+  myChart.data.datasets[1].data = batteryAgg.barValues;
+
+  // SoC line
+  if (currentPeriod==='30min' || currentPeriod==='1h') {
+    myChart.data.datasets[2].hidden = false;
+    myChart.data.datasets[2].data   = batteryAgg.soCLine;  // array of SoC
+  } else {
+    // hide the SoC line for daily/monthly/yearly
+    myChart.data.datasets[2].hidden = true;
+    myChart.data.datasets[2].data = [];
+  }
+
+  // 4. Update Y‐axis title
+  if (currentViewMode==='cost') {
+    myChart.options.scales.y.title.text = 'Cost (£)';
+  } else {
+    myChart.options.scales.y.title.text = 'Consumption (kWh)';
+  }
+
+  myChart.update();
+
+  // 5. Compute totals for the displayed period in *both* consumption & cost (for both raw & battery).
+  //    Then display them in the #totalsContainer.
+  showTotals();
+}
+
+/****************************************************************
+ * aggregator (raw or battery, cost or consumption)
+ * Returns { labels: string[], barValues: number[], soCLine: number[] }
+ * plus partial sums if desired
+ ****************************************************************/
+function buildAggregator(type, mode) {
+  // type='raw' or 'battery'
+  // mode='cost' or 'consumption'
+  if (!currentDate) {
+    return { labels:[], barValues:[], soCLine:[] };
+  }
+
+  // If battery => run battery simulation first if needed
+  let batterySim = null;
+  if (type==='battery') {
+    batterySim = simulateBattery();
+  }
+
+  switch (currentPeriod) {
+    case '30min':
+    case '1h':
+      return aggHourlyOrHalfHourly(type, mode, batterySim);
+    case '1d':
+      return aggDaily(type, mode, batterySim);
+    case '1M':
+      return aggMonthly(type, mode, batterySim);
+    case '1y':
+      return aggYearly(type, mode, batterySim);
+  }
+  return { labels:[], barValues:[], soCLine:[] };
+}
+
+/****************************************************************
+ * SHIFT VIEW: Next/Previous
+ ****************************************************************/
+function shiftView(direction) {
+  switch (currentPeriod) {
+    case '30min':
+    case '1h':
+      currentDate.setUTCDate(currentDate.getUTCDate() + direction);
+      break;
+    case '1d':
+      currentDate.setUTCMonth(currentDate.getUTCMonth() + direction);
+      break;
+    case '1M':
+      currentDate.setUTCFullYear(currentDate.getUTCFullYear() + direction);
+      break;
+    case '1y':
+      currentDate.setUTCFullYear(currentDate.getUTCFullYear() + direction);
+      break;
+  }
+  refreshChart();
+}
+
+/****************************************************************
+ * aggregator: 30min or 1h
+ ****************************************************************/
+function aggHourlyOrHalfHourly(type, mode, batterySim) {
+  // day boundaries
+  let dayStart = new Date(currentDate);
+  dayStart.setUTCHours(0,0,0,0);
+  let dayEnd = new Date(dayStart);
+  dayEnd.setUTCDate(dayEnd.getUTCDate()+1);
+
+  document.getElementById('navLabel').innerText = dayStart.toISOString().slice(0,10);
+
+  let dayStartSec = dayStart.getTime()/1000;
+  let dayEndSec   = dayEnd.getTime()/1000;
+
+  let binSec = (currentPeriod==='30min') ? 1800 : 3600;
+  let labels = [];
+  let barValues = [];
+  let soCLine = [];
+
+  let t = dayStartSec;
+  while (t<dayEndSec) {
+    let binStart = t;
+    let binEnd   = t + binSec;
+    let labelStr = formatHM(new Date(binStart*1000)) + "-" + formatHM(new Date(binEnd*1000));
+
+    let val=0.0, soCsum=0.0, count=0;
+
+    // gather blocks in [binStart, binEnd)
+    if (type==='raw') {
+      // use halfHourData
+      let blocks = halfHourData.filter(b => b.endEpoch>binStart && b.startEpoch<binEnd);
+      for (let blk of blocks) {
+        let overlap = overlapFraction(binStart, binEnd, blk.startEpoch, blk.endEpoch);
+        if (overlap>0) {
+          if (mode==='cost') {
+            // raw aggregator uses defaultTariff ONLY for cost or we can incorporate special? 
+            // The user specifically wanted the original data to reflect original price?
+            // Let’s keep it simple: raw aggregator uses only default price ignoring special table
+            val += (blk.kWh * overlap) * (defaultTariff.pricePence/100.0);
+          } else {
+            val += (blk.kWh * overlap);
+          }
+        }
+      }
+      soCLine.push(0); // no SoC for raw
+    } else {
+      // battery aggregator
+      let blocks = batterySim.filter(b => b.endEpoch>binStart && b.startEpoch<binEnd);
+      for (let bblk of blocks) {
+        let overlap = overlapFraction(binStart, binEnd, bblk.startEpoch, bblk.endEpoch);
+        if (overlap>0) {
+          if (mode==='cost') {
+            val += (bblk.netGridUsage*overlap)*(bblk.tariffPence/100.0);
+          } else {
+            val += (bblk.netGridUsage*overlap);
+          }
+          soCsum += bblk.batterySoC;
+          count++;
+        }
+      }
+      soCLine.push(count>0 ? soCsum/count : 0);
+    }
+
+    labels.push(labelStr);
+    barValues.push(val);
+
+    t+= binSec;
+  }
+
+  return { labels, barValues, soCLine };
+}
+
+/****************************************************************
+ * aggregator: 1 day => show entire month containing currentDate
+ ****************************************************************/
+function aggDaily(type, mode, batterySim) {
+  let dt = new Date(currentDate);
+  let mStart = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), 1));
+  let mEnd   = new Date(mStart);
+  mEnd.setUTCMonth(mEnd.getUTCMonth()+1);
+
+  document.getElementById('navLabel').innerText = mStart.toISOString().slice(0,7);
+
+  let sSec = mStart.getTime()/1000;
+  let eSec = mEnd.getTime()/1000;
+
+  let labels=[];
+  let barValues=[];
+  let soCLine=[];
+
+  let cursor = new Date(mStart);
+  while (cursor<mEnd) {
+    let dayS = new Date(cursor);
+    let dayE = new Date(cursor);
+    dayE.setUTCDate(dayE.getUTCDate()+1);
+
+    let dsSec = dayS.getTime()/1000;
+    let deSec = dayE.getTime()/1000;
+
+    let labelStr = dayS.toISOString().slice(0,10);
+    let val=0.0, soCsum=0.0, count=0;
+
+    if (type==='raw') {
+      let blocks = halfHourData.filter(b => b.endEpoch>dsSec && b.startEpoch<deSec);
+      for (let blk of blocks) {
+        let f= overlapFraction(dsSec, deSec, blk.startEpoch, blk.endEpoch);
+        if (f>0) {
+          if (mode==='cost') {
+            val += (blk.kWh*f)*(defaultTariff.pricePence/100.0);
+          } else {
+            val += (blk.kWh*f);
+          }
+        }
+      }
+      soCLine.push(0);
+    } else {
+      let blocks = batterySim.filter(b => b.endEpoch>dsSec && b.startEpoch<deSec);
+      for (let bblk of blocks) {
+        let f= overlapFraction(dsSec, deSec, bblk.startEpoch, bblk.endEpoch);
+        if (f>0) {
+          if (mode==='cost') {
+            val += (bblk.netGridUsage*f)*(bblk.tariffPence/100.0);
+          } else {
+            val += (bblk.netGridUsage*f);
+          }
+          soCsum+= bblk.batterySoC;
+          count++;
+        }
+      }
+      soCLine.push(count>0? soCsum/count : 0);
+    }
+
+    labels.push(labelStr);
+    barValues.push(val);
+
+    cursor.setUTCDate(cursor.getUTCDate()+1);
+  }
+
+  return { labels, barValues, soCLine };
+}
+
+/****************************************************************
+ * aggregator: 1 month => show entire year containing currentDate
+ ****************************************************************/
+function aggMonthly(type, mode, batterySim) {
+  let dt = new Date(currentDate);
+  let year = dt.getUTCFullYear();
+
+  let yStart = new Date(Date.UTC(year,0,1));
+  let yEnd   = new Date(Date.UTC(year+1,0,1));
+  document.getElementById('navLabel').innerText = year.toString();
+
+  let labels=[];
+  let barValues=[];
+  let soCLine=[];
+
+  let cursor = new Date(yStart);
+  for (let m=0; m<12; m++) {
+    let mS = new Date(cursor);
+    let mE = new Date(cursor);
+    mE.setUTCMonth(mE.getUTCMonth()+1);
+
+    let msSec = mS.getTime()/1000;
+    let meSec = mE.getTime()/1000;
+
+    let labelStr = mS.toISOString().slice(0,7);
+    let val=0.0, soCsum=0.0, count=0;
+
+    if (type==='raw') {
+      let blocks = halfHourData.filter(b => b.endEpoch>msSec && b.startEpoch<meSec);
+      for (let blk of blocks) {
+        let f= overlapFraction(msSec, meSec, blk.startEpoch, blk.endEpoch);
+        if (f>0) {
+          if (mode==='cost') {
+            val += (blk.kWh*f)*(defaultTariff.pricePence/100.0);
+          } else {
+            val += (blk.kWh*f);
+          }
+        }
+      }
+      soCLine.push(0);
+    } else {
+      let blocks = batterySim.filter(b => b.endEpoch>msSec && b.startEpoch<meSec);
+      for (let bblk of blocks) {
+        let f= overlapFraction(msSec, meSec, bblk.startEpoch, bblk.endEpoch);
+        if (f>0) {
+          if (mode==='cost') {
+            val += (bblk.netGridUsage*f)*(bblk.tariffPence/100.0);
+          } else {
+            val += (bblk.netGridUsage*f);
+          }
+          soCsum+= bblk.batterySoC;
+          count++;
+        }
+      }
+      soCLine.push(count>0? (soCsum/count) : 0);
+    }
+
+    labels.push(labelStr);
+    barValues.push(val);
+    cursor.setUTCMonth(cursor.getUTCMonth()+1);
+  }
+
+  return { labels, barValues, soCLine };
+}
+
+/****************************************************************
+ * aggregator: 1y => show all years in dataset
+ ****************************************************************/
+function aggYearly(type, mode, batterySim) {
+  if (halfHourData.length===0) {
+    return { labels:[], barValues:[], soCLine:[] };
+  }
+
+  // We show all years from earliest to latest
+  let earliest = new Date(halfHourData[0].startDateTime);
+  let latest   = new Date(halfHourData[halfHourData.length-1].endDateTime);
+  let eYear = earliest.getUTCFullYear();
+  let lYear = latest.getUTCFullYear();
+
+  document.getElementById('navLabel').innerText = eYear + ' - ' + lYear;
+
+  let globalEarliestSec = halfHourData[0].startEpoch;
+  let globalLatestSec   = halfHourData[halfHourData.length-1].endEpoch;
+
+  let labels=[];
+  let barValues=[];
+  let soCLine=[];
+
+  for (let y=eYear; y<=lYear; y++) {
+    let yS = Date.UTC(y,0,1);
+    let yE = Date.UTC(y+1,0,1);
+    let labelStr = y.toString();
+    // Mark incomplete if partial coverage
+    if (globalEarliestSec > (yS/1000) || globalLatestSec < (yE/1000)) {
+      labelStr += " (Incomplete)";
+    }
+
+    let val=0.0, soCsum=0.0, count=0;
+
+    if (type==='raw') {
+      let blocks = halfHourData.filter(b => b.endEpoch>(yS/1000) && b.startEpoch<(yE/1000));
+      for (let blk of blocks) {
+        let f= overlapFraction(yS/1000, yE/1000, blk.startEpoch, blk.endEpoch);
+        if (f>0) {
+          if (mode==='cost') {
+            val += (blk.kWh*f)*(defaultTariff.pricePence/100.0);
+          } else {
+            val += (blk.kWh*f);
+          }
+        }
+      }
+      soCLine.push(0);
+    } else {
+      let blocks = batterySim.filter(b => b.endEpoch>(yS/1000) && b.startEpoch<(yE/1000));
+      for (let bblk of blocks) {
+        let f= overlapFraction(yS/1000, yE/1000, bblk.startEpoch, bblk.endEpoch);
+        if (f>0) {
+          if (mode==='cost') {
+            val += (bblk.netGridUsage*f)*(bblk.tariffPence/100.0);
+          } else {
+            val += (bblk.netGridUsage*f);
+          }
+          soCsum+= bblk.batterySoC; 
+          count++;
+        }
+      }
+      soCLine.push(count>0?(soCsum/count):0);
+    }
+
+    labels.push(labelStr);
+    barValues.push(val);
+  }
+
+  return { labels, barValues, soCLine };
+}
+
+/****************************************************************
+ * Overlap fraction of two intervals [startA, endA] & [startB, endB]
+ ****************************************************************/
+function overlapFraction(Astart, Aend, Bstart, Bend) {
+  let overlapStart = Math.max(Astart, Bstart);
+  let overlapEnd   = Math.min(Aend, Bend);
+  if (overlapEnd<=overlapStart) return 0;
+  let blockDur = (Bend-Bstart);
+  return (overlapEnd - overlapStart)/blockDur;
+}
+
+/****************************************************************
+ * Battery Simulation
+ * Returns array sorted by startEpoch:
+ * [
+ *   {
+ *     startEpoch, endEpoch,
+ *     netGridUsage,
+ *     batterySoC,
+ *     tariffPence,
+ *     ...
+ *   }
+ * ]
+ ****************************************************************/
+function simulateBattery() {
+  if (batteryCapacity<=0) {
+    // no battery
+    return halfHourData.map(d => {
+      // fallback => no battery changes
+      let { pricePence, mode } = findTariff(d);
+      return {
+        startEpoch: d.startEpoch,
+        endEpoch: d.endEpoch,
+        netGridUsage: d.kWh,
+        batterySoC: 0,
+        tariffPence: pricePence,
+        mode
+      };
+    });
+  }
+
+  // Sort data by time
+  let sorted = halfHourData.slice().sort((a,b)=>a.startEpoch - b.startEpoch);
+  let sim = [];
+  let currentSoC = 0.0;
+
+  for (let blk of sorted) {
+    let usage = blk.kWh;
+    let { pricePence, mode } = findTariff(blk);
+    let netUsage = usage;
+
+    if (mode==='charge') {
+      // can add up to 1.5 kWh
+      let canCharge = Math.min(1.5, batteryCapacity - currentSoC);
+      if (canCharge>0) {
+        netUsage = usage + canCharge;
+        currentSoC += canCharge;
+      }
+    } else {
+      // discharge
+      let canSupply = Math.min(currentSoC, usage);
+      netUsage = usage - canSupply;
+      currentSoC -= canSupply;
+    }
+
+    sim.push({
+      startEpoch: blk.startEpoch,
+      endEpoch:   blk.endEpoch,
+      netGridUsage: netUsage,
+      batterySoC: currentSoC,
+      tariffPence: pricePence,
+      mode
+    });
+  }
+
+  return sim;
+}
+
+/****************************************************************
+ * findTariff(blk)
+ * Decide time-of-day tariff vs. default
+ ****************************************************************/
+function findTariff(blk) {
+  let dt = new Date(blk.startEpoch*1000);
+  let hh = dt.getUTCHours();
+  let mm = dt.getUTCMinutes();
+  let tMinutes = hh*60 + mm;
+
+  for (let st of specialTariffs) {
+    let [sh,sm] = st.startTime.split(':').map(Number);
+    let [eh,em] = st.endTime.split(':').map(Number);
+    let sMin = sh*60 + sm;
+    let eMin = eh*60 + em;
+    if (tMinutes>=sMin && tMinutes<eMin) {
+      // matched
+      return { pricePence: st.pricePence, mode: st.mode };
+    }
+  }
+  // not matched => default
+  return { pricePence: defaultTariff.pricePence, mode: defaultTariff.mode };
+}
+
+/****************************************************************
+ * TOTALLING
+ * We want to display total consumption & total cost for the
+ * *displayed range*, for both raw and battery data.
+ ****************************************************************/
+function showTotals() {
+  // We'll aggregator once for raw consumption, once for raw cost,
+  // once for battery consumption, once for battery cost,
+  // then sum up the barValues we get for the displayed range.
+
+  let rawCons = aggregatorTotal('raw','consumption');
+  let rawCost = aggregatorTotal('raw','cost');
+  let batCons = aggregatorTotal('battery','consumption');
+  let batCost = aggregatorTotal('battery','cost');
+
+  let originalTotals = document.getElementById('originalTotals');
+  originalTotals.innerHTML = `
+    <strong>Original (Raw):</strong><br/>
+    Consumption: ${rawCons.toFixed(3)} kWh<br/>
+    Cost: £${rawCost.toFixed(2)}
+  `;
+  let batteryTotals = document.getElementById('batteryTotals');
+  batteryTotals.innerHTML = `
+    <strong>Battery-Adjusted:</strong><br/>
+    Consumption: ${batCons.toFixed(3)} kWh<br/>
+    Cost: £${batCost.toFixed(2)}
+  `;
+}
+
+/**
+ * aggregatorTotal(type='raw'|'battery', mode='cost'|'consumption')
+ * Sums the aggregator barValues for the *displayed range*.
+ */
+function aggregatorTotal(type, mode) {
+  let aggData = buildAggregator(type, mode);
+  // sum barValues
+  let total = 0.0;
+  for (let v of aggData.barValues) {
+    total += v;
+  }
+  return total;
+}
+
+/****************************************************************
+ * Tariff Table
+ ****************************************************************/
+function toggleTariffTable() {
+  const c = document.getElementById('tariffTableContainer');
+  c.style.display = (c.style.display==='none') ? 'block' : 'none';
+}
+
+function addTariffRow() {
+  let tbody = document.querySelector('#tariffTable tbody');
+  let row = document.createElement('tr');
+
+  // Start time
+  let td1 = document.createElement('td');
+  let inp1 = document.createElement('input');
+  inp1.type='time';
+  inp1.value='08:00';
+  td1.appendChild(inp1);
+
+  // End time
+  let td2 = document.createElement('td');
+  let inp2 = document.createElement('input');
+  inp2.type='time';
+  inp2.value='10:00';
+  td2.appendChild(inp2);
+
+  // Mode
+  let td3 = document.createElement('td');
+  let sel3 = document.createElement('select');
+  let optC = new Option('Charge','charge');
+  let optD = new Option('Discharge','discharge', true);
+  sel3.add(optC);
+  sel3.add(optD);
+  td3.appendChild(sel3);
+
+  // Price
+  let td4 = document.createElement('td');
+  let inp4 = document.createElement('input');
+  inp4.type='number';
+  inp4.step='0.01';
+  inp4.value='40.0';
+  td4.appendChild(inp4);
+
+  // Remove
+  let td5 = document.createElement('td');
+  let btn5 = document.createElement('button');
+  btn5.textContent='Remove';
+  btn5.addEventListener('click', ()=>{
+    row.remove();
+    refreshChart();
+  });
+  td5.appendChild(btn5);
+
+  row.appendChild(td1);
+  row.appendChild(td2);
+  row.appendChild(td3);
+  row.appendChild(td4);
+  row.appendChild(td5);
+
+  [inp1,inp2,sel3,inp4].forEach(el => {
+    el.addEventListener('change', ()=>refreshChart());
+  });
+
+  tbody.appendChild(row);
+}
+
+function readTariffTable() {
+  specialTariffs = [];
+  let rows = document.querySelectorAll('#tariffTable tbody tr');
+  for (let r of rows) {
+    let inputs = r.querySelectorAll('input,select');
+    if (inputs.length<4) continue;
+    let stVal = inputs[0].value; // e.g. "08:00"
+    let enVal = inputs[1].value; // e.g. "10:00"
+    let modeVal = inputs[2].value; // "charge"|"discharge"
+    let priceVal = parseFloat(inputs[3].value);
+    if (!stVal || !enVal || isNaN(priceVal)) continue;
+
+    specialTariffs.push({
+      startTime: stVal,
+      endTime: enVal,
+      mode: modeVal,
+      pricePence: priceVal
+    });
+  }
+  let ov = checkTariffOverlaps(specialTariffs);
+  document.getElementById('overlapWarning').style.display = ov ? 'block' : 'none';
+}
+
+/** Simple overlap check: disallow wrap-midnight, etc. */
+function checkTariffOverlaps(tariffs) {
+  for (let i=0; i<tariffs.length; i++) {
+    let t1 = tariffs[i];
+    let s1 = timeToMinutes(t1.startTime);
+    let e1 = timeToMinutes(t1.endTime);
+    if (e1<=s1) return true; // no wrap-midnight allowed
+    for (let j=i+1; j<tariffs.length; j++){
+      let t2 = tariffs[j];
+      let s2 = timeToMinutes(t2.startTime);
+      let e2 = timeToMinutes(t2.endTime);
+      if (e2<=s2) return true;
+      // overlap if s1<e2 && s2<e1
+      if (s1<e2 && s2<e1) return true;
+    }
+  }
+  return false;
+}
+function timeToMinutes(tt) {
+  let [h,m] = tt.split(':').map(Number);
+  return h*60 + m;
+}
+
+/****************************************************************
+ * Update Default Tariff, Battery
+ ****************************************************************/
+function updateDefaultTariff() {
+  let p = parseFloat(document.getElementById('defaultTariffPrice').value);
+  if (isNaN(p) || p<0) p=30.0;
+  defaultTariff.pricePence = p;
+
+  defaultTariff.mode = document.getElementById('defaultTariffMode').value;
+  refreshChart();
+}
+
+function updateBatteryCapacity() {
+  let c = parseFloat(document.getElementById('batteryCapacity').value);
+  if (isNaN(c) || c<0) c=0;
+  batteryCapacity = c;
+  refreshChart();
+}
+
+/****************************************************************
+ * Helper
+ ****************************************************************/
+function formatHM(dt) {
+  let hh = dt.getUTCHours().toString().padStart(2,'0');
+  let mm = dt.getUTCMinutes().toString().padStart(2,'0');
+  return hh+':'+mm;
+}
+</script>
+</body>
+</html>
+
