@@ -220,6 +220,11 @@ function initCharts() {
           data: []
         },
         {
+          type: 'bar',
+          label: '',
+          data: []
+        },
+        {
           // We'll use a line dataset for Battery SoC in 30min or 1h modes only
           type: 'line',
           label: 'Battery SoC (kWh)',
@@ -283,8 +288,8 @@ function refreshAllCharts() {
   updateChartRaw(rawLabels, rawVals);
 
   // #2: Battery aggregator
-  let batteryResult = buildBatteryAggregatedData();
-  updateChartBattery(batteryResult);
+  let { labels:batteryLabels, values:batteryVals, batteryLine } = buildBatteryAggregatedData();
+  updateChartBattery(batteryLabels, batteryVals, rawLabels, rawVals, batteryLine);
 }
 
 /***********************************************************************
@@ -861,27 +866,30 @@ function updateChartRaw(labels, values) {
 /***********************************************************************
  * Update Chart 2 (Battery)
  ***********************************************************************/
-function updateChartBattery({ labels, values, batteryLine }) {
+function updateChartBattery(batt_labels, batt_values, raw_labels, raw_values, batteryLine) {
   // Bar data
-  myChartBattery.data.labels = labels;
-  myChartBattery.data.datasets[0].data = values;
+  myChartBattery.data.labels = batt_labels;
+  myChartBattery.data.datasets[0].data = raw_values;
+  myChartBattery.data.datasets[1].data = batt_values;
 
   // Hide or show the battery line for 30min/1h only
   if (currentPeriod==='30min' || currentPeriod==='1h') {
-    myChartBattery.data.datasets[1].hidden = false;
-    myChartBattery.data.datasets[1].data = batteryLine;
+    myChartBattery.data.datasets[2].hidden = false;
+    myChartBattery.data.datasets[2].data = batteryLine;
   } else {
     // For daily, monthly, yearly => no line
-    myChartBattery.data.datasets[1].hidden = true;
-    myChartBattery.data.datasets[1].data = [];
+    myChartBattery.data.datasets[2].hidden = true;
+    myChartBattery.data.datasets[2].data = [];
   }
 
   // Adjust axes label
   if (currentViewMode==='cost') {
-    myChartBattery.data.datasets[0].label = 'Cost (£)';
+    myChartBattery.data.datasets[0].label = 'Raw Cost (£)';
+    myChartBattery.data.datasets[1].label = 'Battery adj Cost (£)';
     myChartBattery.options.scales.y.title.text = 'Cost in GBP';
   } else {
-    myChartBattery.data.datasets[0].label = 'Consumption (kWh)';
+    myChartBattery.data.datasets[0].label = 'Raw Consumption (kWh)';
+    myChartBattery.data.datasets[1].label = 'Raw adj Consumption (kWh)';
     myChartBattery.options.scales.y.title.text = 'Consumption (kWh)';
   }
 
